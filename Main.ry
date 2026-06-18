@@ -1,0 +1,149 @@
+import os
+import sqlite3
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters, ConversationHandler
+
+TOKEN = os.getenv("TOKEN")
+
+# 📦 DATABASE
+conn = sqlite3.connect("bot.db", check_same_thread=False)
+cur = conn.cursor()
+
+cur.execute("CREATE TABLE IF NOT EXISTS user (id INTEGER PRIMARY KEY, balance INTEGER)")
+cur.execute("CREATE TABLE IF NOT EXISTS gadgets (name TEXT, price INTEGER, condition TEXT, battery TEXT)")
+conn.commit()
+
+# 🎮 STATES
+NAME, PRICE, CONDITION, BATTERY = range(4)
+
+# 🇺🇦 KEYBOARD
+keyboard = ReplyKeyboardMarkup(
+    [
+        ["💰 Баланс", "📥 Додати гаджет"],
+        ["📤 Продати гаджет", "📦 Мої гаджети"]
+    ],
+    resize_keyboard=True
+)
+
+# 💰 BALANCE
+def get_balance():
+    cur.execute("SELECT balance FROM user WHERE id=1")
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    else:
+        cur.execute("INSERT INTO user (id, balance) VALUES (1, 1000)")
+        conn.commit()
+        return 1000
+
+def set_balance(value):
+    cur.execute("UPDATE user SET balance=? WHERE id=1", (value,))
+    conn.commit()
+
+# 🚀 START
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🎮 Бот запущено!\nКупуй і продавай гаджети 💰📱",
+        reply_markup=keyboard
+    )
+
+# 🧠 MENU
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+
+    if text == "💰 Баланс":
+        await update.message.reply_text(f"💰 Баланс: {get_balance()} €")
+
+    elif text == "📥 Додати гаджет":
+        await update.message.reply_text("📱 Введи назву гаджета:")
+        return NAME
+
+    elif text == "📤 Продати гаджет":
+        await update.message.reply_text("📤 Напиши: назва ціна\nПриклад: iPhone13 450")
+
+    elif text == "📦 Мої гаджети":
+        cur.execute("SELECT * FROM gadgets")
+        rows = cur.fetchall()
+
+        if not rows:
+            await update.message.reply_text("📦 Порожньо")
+        else:
+            msg = "📦 Гаджети:\n\n"
+            for g in rows:
+                msg += f"📱 {g[0]} | 💰{g[1]}€ | ⚙️{g[2]} | 🔋{g[3]}%\n"
+            await update.message.reply_text(msg)
+
+# ➕ ADD FLOW
+async def add_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["name"] = update.message.text
+    await update.message.reply_text("💰 Ціна?")
+    return PRICE
+
+async def add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["price"] = int(update.message.text)
+    await update.message.reply_text("⚙️ Стан?")
+    return CONDITION
+
+async def add_condition(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["condition"] = update.message.text
+    await update.message.reply_text("🔋 Батарея %?")
+    return BATTERY
+
+async def add_battery(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = context.user_data["name"]
+    price = context.user_data["price"]
+    condition = context.user_data["condition"]
+    battery = update.message.text
+
+    balance = get_balance()
+    balance -= price
+    set_balance(balance)
+
+    cur.execute("INSERT INTO gadgets VALUES (?, ?, ?, ?)",
+                (name, price, condition, battery))
+    conn.commit()
+
+    await update.message.reply_text(
+        f"📥 Додано {name}\n💰 -{price}€\nБаланс: {balance}€",
+        reply_markup=keyboard
+    )
+
+    return ConversationHandler.END
+
+# 📤 SELL
+async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        name, price = update.message.text.split()
+        price = int(price)
+
+        balance = get_balance()
+        balance += price
+        set_balance(balance)
+
+        cur.execute("DELETE FROM gadgets WHERE name=?", (name,))
+        conn.commit()
+
+        await update.message.reply_text(f"📤 Продано {name} +{price}€")
+
+    except:
+        await update.message.reply_text("❌ Формат: назва ціна")
+
+# 🔧 APP
+app = Application.builder().token(TOKEN).build()
+
+conv = ConversationHandler(
+    entry_points=[MessageHandler(filters.TEXT & filters.Regex("📥 Додати гаджет"), menu)],
+    states={
+        NAME: [MessageHandler(filters.TEXT, add_name)],
+        PRICE: [MessageHandler(filters.TEXT, add_price)],
+        CONDITION: [MessageHandler(filters.TEXT, add_condition)],
+        BATTERY: [MessageHandler(filters.TEXT, add_battery)],
+    },
+    fallbacks=[]
+)
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu))
+app.add_handler(conv)
+
+app.run_polling()
